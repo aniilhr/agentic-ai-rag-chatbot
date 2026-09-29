@@ -26,6 +26,7 @@ from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, Field
 
 from src.config import REFUSAL_MESSAGE, Settings, get_settings
+from src.models import build_embeddings, build_llm
 
 
 # --------------------------------------------------------------------------- #
@@ -110,31 +111,23 @@ def build_rag_graph(
 
     ``vector_store`` must expose ``similarity_search_with_score(query, k)`` and
     ``llm`` must expose ``with_structured_output(schema)``; both default to the
-    Pinecone / OpenAI implementations and can be replaced with fakes in tests.
+    Pinecone / Gemini implementations and can be replaced with fakes in tests.
     """
     settings = settings or get_settings()
 
     if vector_store is None or llm is None:
         settings.require_api_keys()
     if vector_store is None:
-        from langchain_openai import OpenAIEmbeddings
         from langchain_pinecone import PineconeVectorStore
 
-        embeddings = OpenAIEmbeddings(
-            model=settings.embedding_model, api_key=settings.openai_api_key
-        )
         vector_store = PineconeVectorStore(
             index_name=settings.pinecone_index_name,
-            embedding=embeddings,
+            embedding=build_embeddings(settings),
             namespace=settings.pinecone_namespace,
             pinecone_api_key=settings.pinecone_api_key,
         )
     if llm is None:
-        from langchain_openai import ChatOpenAI
-
-        llm = ChatOpenAI(
-            model=settings.llm_model, temperature=0, api_key=settings.openai_api_key
-        )
+        llm = build_llm(settings)
 
     structured_llm = llm.with_structured_output(GroundedAnswer)
 

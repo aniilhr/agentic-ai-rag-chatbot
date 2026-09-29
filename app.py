@@ -57,12 +57,14 @@ def graph_dependency() -> Any:
 
 
 @app.get("/health")
-def health() -> dict[str, str]:
+def health() -> dict[str, str | int]:
     settings = get_settings()
     return {
         "status": "ok",
+        "provider": "google-gemini",
         "index": settings.pinecone_index_name,
         "embedding_model": settings.embedding_model,
+        "embedding_dimension": settings.embedding_dimension,
         "llm_model": settings.llm_model,
     }
 

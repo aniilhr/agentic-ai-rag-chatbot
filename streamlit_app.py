@@ -15,7 +15,7 @@ from src.graph import build_rag_graph
 st.set_page_config(page_title="Agentic AI eBook Chatbot", page_icon="🤖", layout="wide")
 
 
-@st.cache_resource(show_spinner="Connecting to Pinecone and OpenAI…")
+@st.cache_resource(show_spinner="Connecting to Pinecone and Gemini…")
 def load_graph():
     return build_rag_graph()
 

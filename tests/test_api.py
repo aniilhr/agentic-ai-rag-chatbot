@@ -1,6 +1,7 @@
 from fastapi.testclient import TestClient
 
 import app as api
+from src.config import get_settings
 
 
 def client_for(graph):
@@ -47,14 +48,19 @@ def test_chat_validates_input(make_graph):
 def test_health():
     response = TestClient(api.app).get("/health")
     assert response.status_code == 200
-    assert response.json()["status"] == "ok"
+    body = response.json()
+    assert body["status"] == "ok"
+    settings = get_settings()
+    assert body["embedding_model"] == settings.embedding_model
+    assert body["embedding_dimension"] == settings.embedding_dimension
+    assert body["llm_model"] == settings.llm_model
 
 
 def test_chat_returns_503_when_backend_unavailable(monkeypatch):
     def boom():
-        raise RuntimeError("Missing required environment variable(s): OPENAI_API_KEY")
+        raise RuntimeError("Missing required environment variable(s): GEMINI_API_KEY")
 
     monkeypatch.setattr(api, "get_rag_graph", boom)
     response = TestClient(api.app).post("/chat", json={"query": "What is Agentic AI?"})
     assert response.status_code == 503
-    assert "OPENAI_API_KEY" in response.json()["detail"]
+    assert "GEMINI_API_KEY" in response.json()["detail"]

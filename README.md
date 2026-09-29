@@ -3,7 +3,7 @@
 A Retrieval-Augmented Generation chatbot that answers questions **strictly** from the
 [Agentic AI eBook](https://drive.google.com/file/d/15VLphKcY23_fpYxN62UEQRri_psRVfP9/view).
 Built with **LangGraph** (workflow orchestration), **Pinecone** (vector store),
-**OpenAI** (`text-embedding-3-small` + `gpt-4o-mini`) and exposed through a
+**Google Gemini** (`gemini-embedding-001` + `gemini-2.5-flash`) and exposed through a
 **FastAPI** endpoint and a **Streamlit** chat UI.
 
 Every response contains:
@@ -24,13 +24,13 @@ flowchart LR
         A[Ebook-Agentic-AI.pdf] --> B[PyPDFLoader<br/>1 doc per page]
         B --> C[clean_text<br/>fix hyphenation / whitespace]
         C --> D[RecursiveCharacterTextSplitter<br/>1000 chars, 200 overlap]
-        D --> E[OpenAI embeddings<br/>text-embedding-3-small, 1536-d]
+        D --> E[Gemini embeddings<br/>gemini-embedding-001, 3072-d]
         E --> F[(Pinecone<br/>serverless, cosine)]
     end
 
     subgraph Query["Query time  (LangGraph StateGraph)"]
         Q[question] --> R[retrieve<br/>top-k similarity search]
-        R -->|best similarity ≥ threshold| G[generate<br/>gpt-4o-mini, structured output]
+        R -->|best similarity ≥ threshold| G[generate<br/>gemini-2.5-flash, structured output]
         R -->|best similarity < threshold| X[refuse]
         G --> O[answer + chunks + confidence]
         X --> O
@@ -47,8 +47,8 @@ flowchart LR
 |---|---|
 | `AgentState` (TypedDict) | `question`, `context` (ranked chunks with page + similarity), `retrieval_score`, `answer`, `score`, `grounded`, `cited_chunks` |
 | `retrieve` node | Embeds the question, fetches the top-k (`TOP_K=4`) chunks from Pinecone with their cosine similarity, ranks them and computes a normalised `retrieval_score`. |
-| conditional edge | **Relevance gate** — if even the best chunk is below `RELEVANCE_THRESHOLD` (0.25) the question is off-topic, so the graph routes to `refuse` *without calling the LLM*. |
-| `generate` node | Sends numbered context chunks to `gpt-4o-mini` (temperature 0) with a strict system prompt and forces a **structured response** (`answerable`, `answer`, `cited_chunks`, `confidence`). If the model reports the context is insufficient, the standard refusal is returned. |
+| conditional edge | **Relevance gate** — if even the best chunk is below `RELEVANCE_THRESHOLD` (0.50) the question is off-topic, so the graph routes to `refuse` *without calling the LLM*. |
+| `generate` node | Sends numbered context chunks to `gemini-2.5-flash` (temperature 0) with a strict system prompt and forces a **structured response** (`answerable`, `answer`, `cited_chunks`, `confidence`). If the model reports the context is insufficient, the standard refusal is returned. |
 | `refuse` node | Returns the refusal message with confidence `0.0`. |
 
 `START → retrieve → (generate | refuse) → END`, compiled once with `workflow.compile()` and reused across requests.
@@ -65,14 +65,14 @@ flowchart LR
 ### Confidence score
 
 ```
-retrieval_score  = clamp((best_cosine − 0.20) / (0.65 − 0.20), 0, 1)
+retrieval_score  = clamp((best_cosine − 0.50) / (0.80 − 0.50), 0, 1)
 confidence_score = 0.6 × llm_confidence + 0.4 × retrieval_score     (grounded answers)
 confidence_score = 0.0                                              (refusals)
 ```
 
 `llm_confidence` is the model's self-assessed support level (rubric in the system prompt).
-Raw cosine similarities from `text-embedding-3-small` rarely exceed ~0.7, so they are rescaled
-to a 0–1 range (`SIMILARITY_FLOOR` / `SIMILARITY_CEILING` are configurable). The raw similarity
+Raw cosine similarities from `gemini-embedding-001` sit in a narrow, high band (even unrelated
+text scores around 0.5), so they are rescaled to a 0–1 range (`SIMILARITY_FLOOR` / `SIMILARITY_CEILING` are configurable). The raw similarity
 of every chunk is also returned so the score is fully explainable.
 
 ---
@@ -86,6 +86,7 @@ agentic-ai-rag-chatbot/
 ├── src/
 │   ├── __init__.py
 │   ├── config.py                 # env loading, Settings dataclass, constants
+│   ├── models.py                 # Gemini embedding + chat model factories
 │   ├── ingestion.py              # download → load → clean → chunk → embed → Pinecone upsert
 │   └── graph.py                  # LangGraph state, nodes, conditional routing
 ├── tests/                        # offline unit tests (fake vector store + fake LLM)
@@ -101,7 +102,7 @@ agentic-ai-rag-chatbot/
 
 ## Setup
 
-**Prerequisites:** Python 3.10+, an [OpenAI API key](https://platform.openai.com/api-keys) and a
+**Prerequisites:** Python 3.10+, a [Gemini API key](https://aistudio.google.com/apikey) and a
 free-tier [Pinecone API key](https://app.pinecone.io/).
 
 ```bash
@@ -118,10 +119,15 @@ cp .env.example .env                # then edit .env and add your keys
 `.env`:
 
 ```env
-OPENAI_API_KEY=your_openai_api_key
+GEMINI_API_KEY=your_gemini_api_key
 PINECONE_API_KEY=your_pinecone_api_key
-PINECONE_INDEX_NAME=agentic-ai-index
+PINECONE_INDEX_NAME=agentic-ai-gemini-index
 ```
+
+> **Migrating from the OpenAI version:** `gemini-embedding-001` produces 3072-d vectors, while the
+> old `text-embedding-3-small` index is 1536-d, so the two can't share an index. Use a new
+> `PINECONE_INDEX_NAME` (default `agentic-ai-gemini-index`) and re-run ingestion; ingestion
+> refuses to write into an existing index whose dimension doesn't match.
 
 All other settings (models, chunk size, `TOP_K`, thresholds, Pinecone region/namespace) have
 defaults and are documented in `.env.example`.
@@ -143,8 +149,10 @@ This will:
    if the download is blocked, save the file there manually from the Drive link above),
 2. load it page by page with `PyPDFLoader` and clean extraction artefacts,
 3. split into 1000-character chunks with 200-character overlap (page number and start offset kept as metadata),
-4. create the Pinecone serverless index (`dimension=1536`, `metric=cosine`) if it doesn't exist,
-5. embed and upsert the chunks in batches of 100.
+4. embed a probe string to confirm the model's output dimension matches `EMBEDDING_DIMENSION` (3072),
+5. create the Pinecone serverless index (`dimension=3072`, `metric=cosine`) if it doesn't exist,
+6. embed the chunks with Gemini (`RETRIEVAL_DOCUMENT` task type) and upsert them in batches of 100.
+   Queries are embedded with the same model using the `RETRIEVAL_QUERY` task type.
 
 Chunk ids are content hashes, so re-running ingestion is idempotent (no duplicate vectors).
 Useful flags:
@@ -193,7 +201,7 @@ Response shape (values are illustrative):
 | Endpoint | Description |
 |---|---|
 | `POST /chat` | body `{"query": "..."}` (1–2000 chars) → answer, chunks, confidence |
-| `GET /health` | liveness + configured index / models |
+| `GET /health` | liveness + configured index, Gemini embedding model / dimension and LLM |
 
 Errors: `422` invalid/blank query, `503` missing keys or Pinecone unreachable, `502` upstream LLM failure.
 
@@ -250,7 +258,7 @@ The same suite runs on every push via GitHub Actions (`.github/workflows/tests.y
 - **Citations returned with chunks.** Reviewers can see exactly which retrieved passage supports
   each claim.
 - **Idempotent ingestion.** Deterministic chunk ids + optional `--reset` keep the index clean across re-runs.
-- **Dependency injection for testability.** Fakes replace Pinecone and OpenAI in tests; production code
+- **Dependency injection for testability.** Fakes replace Pinecone and Gemini in tests; production code
   paths are identical.
 
 ## Possible extensions

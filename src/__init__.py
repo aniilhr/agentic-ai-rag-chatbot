@@ -1,1 +1,1 @@
-"""RAG chatbot over the Agentic AI eBook (LangGraph + Pinecone + OpenAI)."""
+"""RAG chatbot over the Agentic AI eBook (LangGraph + Pinecone + Gemini)."""

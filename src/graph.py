@@ -18,6 +18,7 @@ Grounding is enforced twice:
 
 from __future__ import annotations
 
+import logging
 from functools import lru_cache
 from typing import Any, Literal, TypedDict
 
@@ -27,6 +28,8 @@ from pydantic import BaseModel, Field
 
 from src.config import REFUSAL_MESSAGE, Settings, get_settings
 from src.models import build_embeddings, build_llm
+
+logger = logging.getLogger(__name__)
 
 
 # --------------------------------------------------------------------------- #
@@ -92,35 +95,62 @@ def format_context(chunks: list[RetrievedChunk]) -> str:
     )
 
 
+def _open_index(pc, name: str, settings: Settings):
+    """Return ``(index, None)`` if the index holds usable Gemini vectors, else ``(None, reason)``."""
+    dimension = pc.describe_index(name).dimension
+    if dimension != settings.embedding_dimension:
+        return None, (
+            f"Pinecone index '{name}' has dimension {dimension}, but {settings.embedding_model} "
+            f"produces {settings.embedding_dimension}-d vectors"
+        )
+    index = pc.Index(name)
+    namespaces = getattr(index.describe_index_stats(), "namespaces", None) or {}
+    if not getattr(namespaces.get(settings.pinecone_namespace), "vector_count", 0):
+        return None, (
+            f"Pinecone index '{name}' has no vectors in namespace '{settings.pinecone_namespace}'"
+        )
+    return index, None
+
+
 def connect_vector_store(settings: Settings):
-    """Open the Pinecone index, failing fast with an actionable message if it isn't usable."""
+    """Open the Pinecone index, failing fast with an actionable message if it isn't usable.
+
+    If the configured index is missing or unusable (wrong dimension, empty) but
+    exactly one other index holds Gemini vectors for this namespace, that index
+    is used instead and a warning names it, so a typo in PINECONE_INDEX_NAME
+    doesn't take the chatbot down.
+    """
     from langchain_pinecone import PineconeVectorStore
     from pinecone import Pinecone
 
     pc = Pinecone(api_key=settings.pinecone_api_key)
     name = settings.pinecone_index_name
     existing = sorted(pc.list_indexes().names())
-    if name not in existing:
-        raise RuntimeError(
-            f"Pinecone index '{name}' does not exist (available: {existing or 'none'}). "
-            "Run `python -m src.ingestion` to create and populate it, or fix PINECONE_INDEX_NAME."
-        )
 
-    dimension = pc.describe_index(name).dimension
-    if dimension != settings.embedding_dimension:
-        raise RuntimeError(
-            f"Pinecone index '{name}' has dimension {dimension}, but {settings.embedding_model} "
-            f"produces {settings.embedding_dimension}-d vectors. Point PINECONE_INDEX_NAME at the "
-            "Gemini index and run `python -m src.ingestion`."
-        )
+    if name in existing:
+        index, problem = _open_index(pc, name, settings)
+    else:
+        index, problem = None, f"Pinecone index '{name}' does not exist"
 
-    index = pc.Index(name)
-    namespaces = getattr(index.describe_index_stats(), "namespaces", None) or {}
-    namespace = namespaces.get(settings.pinecone_namespace)
-    if not getattr(namespace, "vector_count", 0):
-        raise RuntimeError(
-            f"Pinecone index '{name}' has no vectors in namespace '{settings.pinecone_namespace}'. "
-            "Run `python -m src.ingestion` to embed the eBook."
+    if index is None:
+        compatible = {}
+        for other in existing:
+            if other != name:
+                candidate, _ = _open_index(pc, other, settings)
+                if candidate is not None:
+                    compatible[other] = candidate
+        if len(compatible) != 1:
+            hint = (
+                f"Set PINECONE_INDEX_NAME to one of {sorted(compatible)}"
+                if compatible
+                else "Run `python -m src.ingestion` to create and populate it, or fix PINECONE_INDEX_NAME"
+            )
+            raise RuntimeError(f"{problem} (available indexes: {existing or 'none'}). {hint}.")
+        (fallback, index), = compatible.items()
+        logger.warning(
+            "%s; using '%s', the only index with %d-d vectors in namespace '%s'. "
+            "Set PINECONE_INDEX_NAME=%s in .env to silence this warning.",
+            problem, fallback, settings.embedding_dimension, settings.pinecone_namespace, fallback,
         )
 
     return PineconeVectorStore(

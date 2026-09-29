@@ -96,40 +96,81 @@ class _FakeIndexList:
 
 
 class _FakePinecone:
-    def __init__(self, names, dimension=3072, vector_count=10, namespace="agentic-ai-ebook"):
-        self._names, self._dimension = names, dimension
-        self._stats = SimpleNamespace(namespaces={namespace: SimpleNamespace(vector_count=vector_count)})
+    """``indexes`` maps index name -> (dimension, vectors in the agentic-ai-ebook namespace)."""
+
+    def __init__(self, indexes):
+        self._indexes = indexes
 
     def __call__(self, api_key=None):
         return self
 
     def list_indexes(self):
-        return _FakeIndexList(self._names)
+        return _FakeIndexList(list(self._indexes))
 
     def describe_index(self, name):
-        return SimpleNamespace(dimension=self._dimension)
+        return SimpleNamespace(dimension=self._indexes[name][0])
 
     def Index(self, name):
-        return SimpleNamespace(describe_index_stats=lambda: self._stats)
+        stats = SimpleNamespace(
+            namespaces={"agentic-ai-ebook": SimpleNamespace(vector_count=self._indexes[name][1])}
+        )
+        return SimpleNamespace(name=name, describe_index_stats=lambda: stats)
+
+
+OPENAI_INDEX = ("agentic-ai-index", (1536, 120))
+GEMINI_INDEX = ("agentic-ai-gemini-index", (3072, 120))
+
+
+@pytest.fixture
+def connect(settings, monkeypatch):
+    import langchain_pinecone  # import before patching so it sees the real Pinecone class
+    import pinecone
+
+    monkeypatch.setattr(
+        langchain_pinecone, "PineconeVectorStore", lambda index, embedding, namespace: SimpleNamespace(index=index)
+    )
+
+    def _connect(indexes, index_name="agentic-ai-gemini"):
+        monkeypatch.setattr(pinecone, "Pinecone", _FakePinecone(dict(indexes)))
+        return connect_vector_store(
+            dataclasses.replace(
+                settings, pinecone_index_name=index_name, embedding_dimension=3072,
+                pinecone_namespace="agentic-ai-ebook", gemini_api_key="test",
+            )
+        )
+
+    return _connect
 
 
 @pytest.mark.parametrize(
-    "fake, message",
-    [
-        (_FakePinecone(["agentic-ai-index"]), "does not exist"),
-        (_FakePinecone(["agentic-ai-gemini-index"], dimension=1536), "dimension 1536"),
-        (_FakePinecone(["agentic-ai-gemini-index"], vector_count=0), "no vectors"),
-    ],
+    "configured", ["agentic-ai-gemini", "agentic-ai-index"], ids=["missing", "wrong-dimension"]
 )
-def test_connect_vector_store_explains_unusable_index(settings, monkeypatch, fake, message):
-    import langchain_pinecone  # noqa: F401  (import before patching so it sees the real class)
-    import pinecone
+def test_falls_back_to_the_only_usable_gemini_index(connect, configured, caplog):
+    store = connect([OPENAI_INDEX, GEMINI_INDEX], index_name=configured)
+    assert store.index.name == "agentic-ai-gemini-index"
+    assert "PINECONE_INDEX_NAME=agentic-ai-gemini-index" in caplog.text
 
-    monkeypatch.setattr(pinecone, "Pinecone", fake)
-    settings = dataclasses.replace(
-        settings, pinecone_index_name="agentic-ai-gemini-index", embedding_dimension=3072,
-        pinecone_namespace="agentic-ai-ebook",
-    )
-    with pytest.raises(RuntimeError, match=message) as excinfo:
-        connect_vector_store(settings)
-    assert "src.ingestion" in str(excinfo.value)
+
+def test_uses_configured_index_when_usable(connect):
+    other = ("agentic-ai-gemini-v2", (3072, 50))
+    store = connect([GEMINI_INDEX, other], index_name="agentic-ai-gemini-index")
+    assert store.index.name == "agentic-ai-gemini-index"
+
+
+@pytest.mark.parametrize(
+    "indexes, configured, message",
+    [
+        ([OPENAI_INDEX], "agentic-ai-gemini", "does not exist.*src.ingestion"),
+        ([OPENAI_INDEX], "agentic-ai-index", "dimension 1536.*src.ingestion"),
+        ([("agentic-ai-gemini-index", (3072, 0))], "agentic-ai-gemini-index", "no vectors.*src.ingestion"),
+        (
+            [GEMINI_INDEX, ("agentic-ai-gemini-v2", (3072, 50))],
+            "agentic-ai-gemini",
+            r"Set PINECONE_INDEX_NAME to one of \['agentic-ai-gemini-index', 'agentic-ai-gemini-v2'\]",
+        ),
+    ],
+    ids=["missing", "wrong-dimension", "empty", "ambiguous"],
+)
+def test_explains_when_no_usable_index(connect, indexes, configured, message):
+    with pytest.raises(RuntimeError, match=message):
+        connect(indexes, index_name=configured)

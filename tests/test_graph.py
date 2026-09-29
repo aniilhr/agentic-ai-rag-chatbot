@@ -1,5 +1,10 @@
+import dataclasses
+from types import SimpleNamespace
+
+import pytest
+
 from src.config import REFUSAL_MESSAGE
-from src.graph import GroundedAnswer, format_context, normalise_similarity
+from src.graph import GroundedAnswer, connect_vector_store, format_context, normalise_similarity
 
 
 def test_grounded_answer_flows_through_generate(make_graph):
@@ -80,3 +85,51 @@ def test_normalise_similarity_clamps():
 def test_format_context_handles_missing_page():
     text = format_context([{"rank": 1, "text": "x", "page": None, "source": "", "similarity": 0.5}])
     assert text == "[1] (page ?)\nx"
+
+
+class _FakeIndexList:
+    def __init__(self, names):
+        self._names = names
+
+    def names(self):
+        return self._names
+
+
+class _FakePinecone:
+    def __init__(self, names, dimension=3072, vector_count=10, namespace="agentic-ai-ebook"):
+        self._names, self._dimension = names, dimension
+        self._stats = SimpleNamespace(namespaces={namespace: SimpleNamespace(vector_count=vector_count)})
+
+    def __call__(self, api_key=None):
+        return self
+
+    def list_indexes(self):
+        return _FakeIndexList(self._names)
+
+    def describe_index(self, name):
+        return SimpleNamespace(dimension=self._dimension)
+
+    def Index(self, name):
+        return SimpleNamespace(describe_index_stats=lambda: self._stats)
+
+
+@pytest.mark.parametrize(
+    "fake, message",
+    [
+        (_FakePinecone(["agentic-ai-index"]), "does not exist"),
+        (_FakePinecone(["agentic-ai-gemini-index"], dimension=1536), "dimension 1536"),
+        (_FakePinecone(["agentic-ai-gemini-index"], vector_count=0), "no vectors"),
+    ],
+)
+def test_connect_vector_store_explains_unusable_index(settings, monkeypatch, fake, message):
+    import langchain_pinecone  # noqa: F401  (import before patching so it sees the real class)
+    import pinecone
+
+    monkeypatch.setattr(pinecone, "Pinecone", fake)
+    settings = dataclasses.replace(
+        settings, pinecone_index_name="agentic-ai-gemini-index", embedding_dimension=3072,
+        pinecone_namespace="agentic-ai-ebook",
+    )
+    with pytest.raises(RuntimeError, match=message) as excinfo:
+        connect_vector_store(settings)
+    assert "src.ingestion" in str(excinfo.value)

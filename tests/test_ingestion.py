@@ -1,6 +1,9 @@
+import dataclasses
+
+import pytest
 from langchain_core.documents import Document
 
-from src.ingestion import clean_text, split_documents
+from src.ingestion import clean_text, detect_embedding_dimension, split_documents
 
 
 def test_clean_text_normalises_pdf_artifacts():
@@ -32,3 +35,20 @@ def test_chunks_overlap():
     chunks = split_documents([Document(page_content=body, metadata={"page": 0})], 300, 100)
     first_tail = chunks[0].page_content.split()[-3:]
     assert all(word in chunks[1].page_content for word in first_tail)
+
+
+class _FakeEmbeddings:
+    def __init__(self, dimension):
+        self.dimension = dimension
+
+    def embed_query(self, text):
+        return [0.0] * self.dimension
+
+
+def test_detect_embedding_dimension_matches_config(settings):
+    assert detect_embedding_dimension(_FakeEmbeddings(settings.embedding_dimension), settings) == settings.embedding_dimension
+
+
+def test_detect_embedding_dimension_rejects_mismatch(settings):
+    with pytest.raises(RuntimeError, match="EMBEDDING_DIMENSION"):
+        detect_embedding_dimension(_FakeEmbeddings(1536), dataclasses.replace(settings, embedding_dimension=3072))

@@ -1,6 +1,8 @@
 from fastapi.testclient import TestClient
+from google.genai.errors import ClientError, ServerError
 
 import app as api
+from src.config import get_settings
 
 
 def client_for(graph):
@@ -47,14 +49,42 @@ def test_chat_validates_input(make_graph):
 def test_health():
     response = TestClient(api.app).get("/health")
     assert response.status_code == 200
-    assert response.json()["status"] == "ok"
+    body = response.json()
+    assert body["status"] == "ok"
+    settings = get_settings()
+    assert body["embedding_model"] == settings.embedding_model
+    assert body["embedding_dimension"] == settings.embedding_dimension
+    assert body["llm_model"] == settings.llm_model
 
 
 def test_chat_returns_503_when_backend_unavailable(monkeypatch):
     def boom():
-        raise RuntimeError("Missing required environment variable(s): OPENAI_API_KEY")
+        raise RuntimeError("Missing required environment variable(s): GEMINI_API_KEY")
 
     monkeypatch.setattr(api, "get_rag_graph", boom)
     response = TestClient(api.app).post("/chat", json={"query": "What is Agentic AI?"})
     assert response.status_code == 503
-    assert "OPENAI_API_KEY" in response.json()["detail"]
+    assert "GEMINI_API_KEY" in response.json()["detail"]
+
+
+class _FailingGraph:
+    def __init__(self, error):
+        self.error = error
+
+    def invoke(self, state):
+        raise self.error
+
+
+def test_chat_returns_503_with_retry_after_when_gemini_is_overloaded():
+    error = ServerError(503, {"error": {"code": 503, "message": "high demand", "status": "UNAVAILABLE"}})
+    response = client_for(_FailingGraph(error)).post("/chat", json={"query": "What is Agentic AI?"})
+    assert response.status_code == 503
+    assert response.headers["Retry-After"] == "30"
+    assert "temporarily unavailable" in response.json()["detail"]
+
+
+def test_chat_returns_502_for_permanent_upstream_errors():
+    error = ClientError(400, {"error": {"code": 400, "message": "bad request", "status": "INVALID_ARGUMENT"}})
+    response = client_for(_FailingGraph(error)).post("/chat", json={"query": "What is Agentic AI?"})
+    assert response.status_code == 502
+    assert "upstream status 400" in response.json()["detail"]

@@ -23,6 +23,7 @@ from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from src.config import PDF_DRIVE_URL, Settings, get_settings
+from src.models import build_embeddings
 
 logger = logging.getLogger(__name__)
 
@@ -117,8 +118,24 @@ def make_chunk_id(chunk: Document) -> str:
 # --------------------------------------------------------------------------- #
 # Load
 # --------------------------------------------------------------------------- #
-def ensure_index(settings: Settings):
-    """Create the serverless Pinecone index (1536-d, cosine) if it doesn't exist."""
+def detect_embedding_dimension(embeddings, settings: Settings) -> int:
+    """Embed a probe string and check the model returns the configured dimension."""
+    dimension = len(embeddings.embed_query("dimension probe"))
+    if dimension != settings.embedding_dimension:
+        raise RuntimeError(
+            f"{settings.embedding_model} returned {dimension}-d vectors but "
+            f"EMBEDDING_DIMENSION={settings.embedding_dimension}. Fix EMBEDDING_DIMENSION."
+        )
+    logger.info("%s produces %d-d embeddings", settings.embedding_model, dimension)
+    return dimension
+
+
+def ensure_index(settings: Settings, dimension: int):
+    """Create the serverless Pinecone index (``dimension``-d, cosine) if it doesn't exist.
+
+    An existing index with a different dimension (e.g. one built for another
+    embedding model) is never reused.
+    """
     from pinecone import Pinecone, ServerlessSpec
 
     pc = Pinecone(api_key=settings.pinecone_api_key)
@@ -127,11 +144,11 @@ def ensure_index(settings: Settings):
         logger.info(
             "Creating Pinecone index '%s' (dim=%d, metric=cosine)",
             settings.pinecone_index_name,
-            settings.embedding_dimension,
+            dimension,
         )
         pc.create_index(
             name=settings.pinecone_index_name,
-            dimension=settings.embedding_dimension,
+            dimension=dimension,
             metric="cosine",
             spec=ServerlessSpec(cloud=settings.pinecone_cloud, region=settings.pinecone_region),
         )
@@ -139,21 +156,21 @@ def ensure_index(settings: Settings):
             time.sleep(1)
     else:
         description = pc.describe_index(settings.pinecone_index_name)
-        if description.dimension != settings.embedding_dimension:
+        if description.dimension != dimension:
             raise RuntimeError(
                 f"Index '{settings.pinecone_index_name}' has dimension {description.dimension}, "
-                f"but {settings.embedding_model} produces {settings.embedding_dimension}. "
+                f"but {settings.embedding_model} produces {dimension}. "
                 "Use a different PINECONE_INDEX_NAME or delete the index."
             )
     return pc.Index(settings.pinecone_index_name)
 
 
 def upsert_chunks(chunks: list[Document], settings: Settings, reset: bool = False) -> int:
-    """Embed chunks with OpenAI and upsert them into Pinecone in batches."""
-    from langchain_openai import OpenAIEmbeddings
+    """Embed chunks with Gemini and upsert them into Pinecone in batches."""
     from langchain_pinecone import PineconeVectorStore
 
-    index = ensure_index(settings)
+    embeddings = build_embeddings(settings)
+    index = ensure_index(settings, detect_embedding_dimension(embeddings, settings))
     if reset:
         try:
             index.delete(delete_all=True, namespace=settings.pinecone_namespace)
@@ -161,9 +178,6 @@ def upsert_chunks(chunks: list[Document], settings: Settings, reset: bool = Fals
         except Exception:  # namespace does not exist yet
             logger.info("Namespace '%s' is empty; nothing to reset", settings.pinecone_namespace)
 
-    embeddings = OpenAIEmbeddings(
-        model=settings.embedding_model, api_key=settings.openai_api_key
-    )
     vector_store = PineconeVectorStore(
         index=index, embedding=embeddings, namespace=settings.pinecone_namespace
     )

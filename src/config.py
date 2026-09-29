@@ -35,7 +35,7 @@ def _env(name: str, default: str) -> str:
 
 @dataclass(frozen=True)
 class Settings:
-    openai_api_key: str | None
+    gemini_api_key: str | None
     pinecone_api_key: str | None
     pinecone_index_name: str
     pinecone_namespace: str
@@ -44,14 +44,17 @@ class Settings:
     embedding_model: str
     embedding_dimension: int
     llm_model: str
+    # Tried in order when llm_model is overloaded or not available for the API key.
+    llm_fallback_models: tuple[str, ...]
     pdf_path: Path
     chunk_size: int
     chunk_overlap: int
     top_k: int
     relevance_threshold: float
     # Cosine-similarity range mapped linearly onto a 0..1 retrieval confidence.
-    # text-embedding-3-small rarely exceeds ~0.7 even for near-paraphrases, so
-    # raw cosine values would make every answer look uncertain.
+    # gemini-embedding-001 scores sit in a narrow, high band (unrelated text
+    # still lands around ~0.5), so raw cosine values are not a usable
+    # confidence on their own.
     similarity_floor: float
     similarity_ceiling: float
 
@@ -59,7 +62,7 @@ class Settings:
         missing = [
             name
             for name, value in (
-                ("OPENAI_API_KEY", self.openai_api_key),
+                ("GEMINI_API_KEY", self.gemini_api_key),
                 ("PINECONE_API_KEY", self.pinecone_api_key),
             )
             if not value
@@ -78,20 +81,28 @@ def get_settings() -> Settings:
         pdf_path = PROJECT_ROOT / pdf_path
 
     return Settings(
-        openai_api_key=os.getenv("OPENAI_API_KEY"),
+        gemini_api_key=os.getenv("GEMINI_API_KEY"),
         pinecone_api_key=os.getenv("PINECONE_API_KEY"),
-        pinecone_index_name=_env("PINECONE_INDEX_NAME", "agentic-ai-index"),
+        pinecone_index_name=_env("PINECONE_INDEX_NAME", "agentic-ai-gemini-index"),
         pinecone_namespace=_env("PINECONE_NAMESPACE", "agentic-ai-ebook"),
         pinecone_cloud=_env("PINECONE_CLOUD", "aws"),
         pinecone_region=_env("PINECONE_REGION", "us-east-1"),
-        embedding_model=_env("EMBEDDING_MODEL", "text-embedding-3-small"),
-        embedding_dimension=int(_env("EMBEDDING_DIMENSION", "1536")),
-        llm_model=_env("LLM_MODEL", "gpt-4o-mini"),
+        embedding_model=_env("EMBEDDING_MODEL", "gemini-embedding-001"),
+        embedding_dimension=int(_env("EMBEDDING_DIMENSION", "3072")),
+        llm_model=_env("LLM_MODEL", "gemini-2.5-flash"),
+        llm_fallback_models=tuple(
+            name.strip()
+            for name in _env(
+                "LLM_FALLBACK_MODELS",
+                "gemini-flash-latest,gemini-2.5-flash-lite,gemini-flash-lite-latest",
+            ).split(",")
+            if name.strip()
+        ),
         pdf_path=pdf_path,
         chunk_size=int(_env("CHUNK_SIZE", "1000")),
         chunk_overlap=int(_env("CHUNK_OVERLAP", "200")),
         top_k=int(_env("TOP_K", "4")),
-        relevance_threshold=float(_env("RELEVANCE_THRESHOLD", "0.25")),
-        similarity_floor=float(_env("SIMILARITY_FLOOR", "0.20")),
-        similarity_ceiling=float(_env("SIMILARITY_CEILING", "0.65")),
+        relevance_threshold=float(_env("RELEVANCE_THRESHOLD", "0.50")),
+        similarity_floor=float(_env("SIMILARITY_FLOOR", "0.50")),
+        similarity_ceiling=float(_env("SIMILARITY_CEILING", "0.80")),
     )

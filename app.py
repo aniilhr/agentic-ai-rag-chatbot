@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 
 from src.config import get_settings
 from src.graph import get_rag_graph
+from src.models import error_status_code, is_transient_error
 
 logger = logging.getLogger("rag-api")
 
@@ -57,13 +58,16 @@ def graph_dependency() -> Any:
 
 
 @app.get("/health")
-def health() -> dict[str, str]:
+def health() -> dict[str, str | int]:
     settings = get_settings()
     return {
         "status": "ok",
+        "provider": "google-gemini",
         "index": settings.pinecone_index_name,
         "embedding_model": settings.embedding_model,
+        "embedding_dimension": settings.embedding_dimension,
         "llm_model": settings.llm_model,
+        "llm_fallback_models": ",".join(settings.llm_fallback_models),
     }
 
 
@@ -78,7 +82,18 @@ def chat(request: QueryRequest, graph: Any = Depends(graph_dependency)) -> Query
         result = graph.invoke({"question": query})
     except Exception as exc:
         logger.exception("RAG pipeline failed")
-        raise HTTPException(status_code=502, detail=f"RAG pipeline failed: {exc}") from exc
+        if is_transient_error(exc):
+            # Every retry and fallback model was overloaded / rate limited.
+            raise HTTPException(
+                status_code=503,
+                detail="Gemini is temporarily unavailable (high demand or rate limit) and every "
+                f"retry and fallback model failed. Please retry shortly. ({exc})",
+                headers={"Retry-After": "30"},
+            ) from exc
+        raise HTTPException(
+            status_code=502,
+            detail=f"RAG pipeline failed (upstream status {error_status_code(exc) or 'n/a'}): {exc}",
+        ) from exc
 
     cited = set(result.get("cited_chunks", []))
     return QueryResponse(

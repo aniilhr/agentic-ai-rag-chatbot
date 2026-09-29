@@ -1,4 +1,4 @@
-"""Offline fakes so the pipeline can be tested without OpenAI or Pinecone keys."""
+"""Offline fakes so the pipeline can be tested without Gemini or Pinecone keys."""
 
 from __future__ import annotations
 

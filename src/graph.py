@@ -92,6 +92,42 @@ def format_context(chunks: list[RetrievedChunk]) -> str:
     )
 
 
+def connect_vector_store(settings: Settings):
+    """Open the Pinecone index, failing fast with an actionable message if it isn't usable."""
+    from langchain_pinecone import PineconeVectorStore
+    from pinecone import Pinecone
+
+    pc = Pinecone(api_key=settings.pinecone_api_key)
+    name = settings.pinecone_index_name
+    existing = sorted(pc.list_indexes().names())
+    if name not in existing:
+        raise RuntimeError(
+            f"Pinecone index '{name}' does not exist (available: {existing or 'none'}). "
+            "Run `python -m src.ingestion` to create and populate it, or fix PINECONE_INDEX_NAME."
+        )
+
+    dimension = pc.describe_index(name).dimension
+    if dimension != settings.embedding_dimension:
+        raise RuntimeError(
+            f"Pinecone index '{name}' has dimension {dimension}, but {settings.embedding_model} "
+            f"produces {settings.embedding_dimension}-d vectors. Point PINECONE_INDEX_NAME at the "
+            "Gemini index and run `python -m src.ingestion`."
+        )
+
+    index = pc.Index(name)
+    namespaces = getattr(index.describe_index_stats(), "namespaces", None) or {}
+    namespace = namespaces.get(settings.pinecone_namespace)
+    if not getattr(namespace, "vector_count", 0):
+        raise RuntimeError(
+            f"Pinecone index '{name}' has no vectors in namespace '{settings.pinecone_namespace}'. "
+            "Run `python -m src.ingestion` to embed the eBook."
+        )
+
+    return PineconeVectorStore(
+        index=index, embedding=build_embeddings(settings), namespace=settings.pinecone_namespace
+    )
+
+
 def normalise_similarity(similarity: float, floor: float, ceiling: float) -> float:
     """Map a raw cosine similarity onto 0..1 using the configured range."""
     if ceiling <= floor:
@@ -118,14 +154,7 @@ def build_rag_graph(
     if vector_store is None or llm is None:
         settings.require_api_keys()
     if vector_store is None:
-        from langchain_pinecone import PineconeVectorStore
-
-        vector_store = PineconeVectorStore(
-            index_name=settings.pinecone_index_name,
-            embedding=build_embeddings(settings),
-            namespace=settings.pinecone_namespace,
-            pinecone_api_key=settings.pinecone_api_key,
-        )
+        vector_store = connect_vector_store(settings)
     if llm is None:
         llm = build_llm(settings)
 

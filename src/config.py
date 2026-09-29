@@ -44,6 +44,8 @@ class Settings:
     embedding_model: str
     embedding_dimension: int
     llm_model: str
+    # Tried in order when llm_model is overloaded or not available for the API key.
+    llm_fallback_models: tuple[str, ...]
     pdf_path: Path
     chunk_size: int
     chunk_overlap: int
@@ -88,6 +90,14 @@ def get_settings() -> Settings:
         embedding_model=_env("EMBEDDING_MODEL", "gemini-embedding-001"),
         embedding_dimension=int(_env("EMBEDDING_DIMENSION", "3072")),
         llm_model=_env("LLM_MODEL", "gemini-2.5-flash"),
+        llm_fallback_models=tuple(
+            name.strip()
+            for name in _env(
+                "LLM_FALLBACK_MODELS",
+                "gemini-flash-latest,gemini-2.5-flash-lite,gemini-flash-lite-latest",
+            ).split(",")
+            if name.strip()
+        ),
         pdf_path=pdf_path,
         chunk_size=int(_env("CHUNK_SIZE", "1000")),
         chunk_overlap=int(_env("CHUNK_OVERLAP", "200")),

@@ -11,6 +11,7 @@ from __future__ import annotations
 import streamlit as st
 
 from src.graph import build_rag_graph
+from src.models import is_transient_error
 
 st.set_page_config(page_title="Agentic AI eBook Chatbot", page_icon="🤖", layout="wide")
 
@@ -25,8 +26,8 @@ st.caption("Answers are generated strictly from the Agentic AI eBook. Off-topic 
 
 try:
     graph = load_graph()
-except RuntimeError as exc:
-    st.error(str(exc))
+except Exception as exc:  # missing keys, Pinecone index missing/empty, ...
+    st.error(f"Could not start the chatbot: {exc}")
     st.stop()
 
 if "messages" not in st.session_state:
@@ -43,11 +44,22 @@ if prompt := st.chat_input("Ask something about Agentic AI…"):
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
-        with st.spinner("Retrieving and generating…"):
-            result = graph.invoke({"question": prompt})
-        st.markdown(result["answer"])
-    st.session_state.messages.append({"role": "assistant", "content": result["answer"]})
-    st.session_state.last_result = result
+        try:
+            with st.spinner("Retrieving and generating…"):
+                result = graph.invoke({"question": prompt})
+        except Exception as exc:
+            result = None
+            if is_transient_error(exc):
+                st.warning("Gemini is busy right now (high demand or rate limit). Please ask again in a moment.")
+            else:
+                st.error(f"Something went wrong while answering: {exc}")
+        if result is not None:
+            st.markdown(result["answer"])
+    if result is not None:
+        st.session_state.messages.append({"role": "assistant", "content": result["answer"]})
+        st.session_state.last_result = result
+    else:
+        st.session_state.messages.pop()  # let the user resend the same question
 
 with st.sidebar:
     st.header("Retrieval details")

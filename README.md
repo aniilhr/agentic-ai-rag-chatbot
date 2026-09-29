@@ -75,6 +75,16 @@ Raw cosine similarities from `gemini-embedding-001` sit in a narrow, high band (
 text scores around 0.5), so they are rescaled to a 0–1 range (`SIMILARITY_FLOOR` / `SIMILARITY_CEILING` are configurable). The raw similarity
 of every chunk is also returned so the score is fully explainable.
 
+### Error handling
+
+| Failure | What happens |
+|---|---|
+| Gemini overloaded / rate limited (`503 UNAVAILABLE`, `429`) | Each chat call is retried (3 attempts per model with backoff), then the next model in `LLM_FALLBACK_MODELS` is tried. Embedding calls are retried up to 5 times; the embedding model is never swapped, since vectors from different models aren't comparable. If everything is still overloaded, `/chat` returns **503** with a `Retry-After` header. |
+| Chat model not available for the API key (`404`) | At startup the models your key can call are listed, and unavailable ones in `LLM_MODEL` / `LLM_FALLBACK_MODELS` are skipped. If none are available, any Flash text model the key has is used. |
+| Invalid `GEMINI_API_KEY` | Startup fails with a clear message and `/chat` returns 503. |
+| Pinecone index missing, wrong dimension, or empty | Startup fails with a message telling you to run `python -m src.ingestion` (or fix `PINECONE_INDEX_NAME`); `/chat` returns 503. It recovers without a restart once the index is ready. |
+| Any other upstream error | `/chat` returns 502 with the upstream status code in `detail`. |
+
 ---
 
 ## Project structure
@@ -86,7 +96,7 @@ agentic-ai-rag-chatbot/
 ├── src/
 │   ├── __init__.py
 │   ├── config.py                 # env loading, Settings dataclass, constants
-│   ├── models.py                 # Gemini embedding + chat model factories
+│   ├── models.py                 # Gemini embedding + chat factories, retries, model fallbacks
 │   ├── ingestion.py              # download → load → clean → chunk → embed → Pinecone upsert
 │   └── graph.py                  # LangGraph state, nodes, conditional routing
 ├── tests/                        # offline unit tests (fake vector store + fake LLM)
